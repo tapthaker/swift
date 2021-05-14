@@ -84,6 +84,27 @@ ModuleDepGraph::Changes ModuleDepGraph::loadFromPath(const Job *Cmd,
   return r;
 }
 
+ModuleDepGraph::Changes
+ModuleDepGraph::loadFromPathWmo(const Job *Cmd, StringRef path,
+                                DiagnosticEngine &diags) {
+  FrontendStatsTracer tracer(stats,
+                             "fine-grained-dependencies-loadFromPath-wmo");
+  PrettyStackTraceStringAction stackTrace(
+      "loading fine-grained dependency graph", path);
+
+  auto buffer = llvm::MemoryBuffer::getFile(path);
+  if (!buffer)
+    return None;
+  Optional<SourceFileDepGraph> sourceFileDepGraph =
+      SourceFileDepGraph::loadFromBuffer(*buffer.get());
+  jobsBySwiftDeps.insert(std::make_pair(path.str(), Cmd));
+  if (!sourceFileDepGraph)
+    return None;
+
+  auto changes = integrate(sourceFileDepGraph.getValue(), path);
+  return changes;
+}
+
 /// Returns None for error or a set of changed keys
 ModuleDepGraph::Changes
 ModuleDepGraph::loadFromBuffer(const Job *job, llvm::MemoryBuffer &buffer,

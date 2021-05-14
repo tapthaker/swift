@@ -198,6 +198,9 @@ public:
   CompileJobAction(Action *Input, file_types::ID OutputType, InputInfo info)
       : IncrementalJobAction(Action::Kind::CompileJob, Input, OutputType,
                              info) {}
+  CompileJobAction(file_types::ID OutputType, InputInfo info)
+      : IncrementalJobAction(Action::Kind::CompileJob, None, OutputType, info) {
+  }
 
   static bool classof(const Action *A) {
     return A->getKind() == Action::Kind::CompileJob;

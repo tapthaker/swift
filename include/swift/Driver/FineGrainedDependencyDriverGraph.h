@@ -327,6 +327,8 @@ public:
   /// compensates.
   Changes loadFromPath(const driver::Job *, StringRef, DiagnosticEngine &);
 
+  Changes loadFromPathWmo(const driver::Job *, StringRef, DiagnosticEngine &);
+
   Changes loadFromSourceFileDepGraph(const driver::Job *cmd,
                                      const SourceFileDepGraph &,
                                      DiagnosticEngine &);

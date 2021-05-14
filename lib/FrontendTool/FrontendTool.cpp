@@ -574,6 +574,38 @@ static void emitSwiftdepsForAllPrimaryInputsIfNeeded(
     emitReferenceDependencies(Instance, SF, referenceDependenciesFilePath);
   }
 }
+
+static void emitSwiftdepsForAllSourceFilesIfNeeded(CompilerInstance &Instance) {
+
+if (!Instance.getInvocation().getFrontendOptions().EnableExperimentalCrossModuleIncrementalBuild) {
+    return;
+  }
+
+  // Do not write out swiftdeps for any primaries if we've encountered an
+  // error.
+  if (Instance.getDiags().hadAnyError())
+    return;
+
+  for (auto *filename : Instance.getMainModule()->getFiles()) {
+    auto *SF = dyn_cast<SourceFile>(filename);
+    if (!SF)
+      continue;
+    using SourceFileDepGraph = fine_grained_dependencies::SourceFileDepGraph;
+    llvm::SmallString<512> pathBuf;
+    llvm::StringRef path =
+        ("/tmp/cross-module-wmo/" + SF->getFilename() + ".swiftdeps")
+            .toStringRef(pathBuf);
+    llvm::sys::fs::create_directories(llvm::sys::path::parent_path(path));
+    fine_grained_dependencies::withReferenceDependencies(
+        SF, *Instance.getDependencyTracker(), path, false,
+        [&](SourceFileDepGraph &&g) {
+          fine_grained_dependencies::writeFineGrainedDependencyGraphToPath(
+              Instance.getDiags(), path, g);
+          return false;
+        });
+  }
+}
+
 static void
 emitSwiftRangesForAllPrimaryInputsIfNeeded(CompilerInstance &Instance) {
   const auto &Invocation = Instance.getInvocation();
@@ -971,8 +1003,13 @@ static void performEndOfPipelineActions(CompilerInstance &Instance) {
     emitIndexData(Instance);
   }
 
-  // Emit Swiftdeps for every file in the batch.
-  emitSwiftdepsForAllPrimaryInputsIfNeeded(Instance);
+  if (Instance.getPrimarySourceFiles().empty()) {
+    // This is an invocation with wmo
+    emitSwiftdepsForAllSourceFilesIfNeeded(Instance);
+  } else {
+    // Emit Swiftdeps for every file in the batch.
+    emitSwiftdepsForAllPrimaryInputsIfNeeded(Instance);
+  }
 
   // Emit Make-style dependencies.
   emitMakeDependenciesIfNeeded(Instance.getDiags(),
