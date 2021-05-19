@@ -450,6 +450,18 @@ StringRef Job::getFirstSwiftPrimaryInput() const {
   return StringRef();
 }
 
+void Job::setModtimeForInput(const llvm::opt::Arg *Input,
+                             llvm::sys::TimePoint<> PreviousModTime) {
+  inputPreviousModTimeMap[Input] = PreviousModTime;
+}
+
+llvm::sys::TimePoint<>
+Job::getModTimeforInput(const llvm::opt::Arg *Input) const {
+  auto it = inputPreviousModTimeMap.find(Input);
+  return it == inputPreviousModTimeMap.end() ? llvm::sys::TimePoint<>::max()
+                                             : it->second;
+}
+
 BatchJob::BatchJob(const JobAction &Source,
                    SmallVectorImpl<const Job *> &&Inputs,
                    std::unique_ptr<CommandOutput> Output,

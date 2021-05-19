@@ -764,23 +764,35 @@ getDriverBatchCount(llvm::opt::InputArgList &ArgList,
 static bool computeIncremental(const llvm::opt::InputArgList *ArgList,
                                const bool ShowIncrementalBuildDecisions) {
 
-  const char *ReasonToDisable =
-      ArgList->hasArg(options::OPT_embed_bitcode)
-          ? "is not currently compatible with embedding LLVM IR bitcode."
-          : nullptr;
-
   bool isWMO =
       ArgList->hasFlag(options::OPT_whole_module_optimization,
                        options::OPT_no_whole_module_optimization, false);
 
-  if (!ReasonToDisable)
-    return true;
+  bool hasIncremental = ArgList->hasArg(options::OPT_incremental);
 
-  if (ShowIncrementalBuildDecisions) {
-    llvm::outs() << "Incremental compilation has been disabled, because it "
-                 << ReasonToDisable;
+  if (ArgList->hasArg(options::OPT_embed_bitcode)) {
+    if (ShowIncrementalBuildDecisions) {
+      llvm::outs()
+          << "Incremental compilation has been disabled, because it "
+          << "is not currently compatible with embedding LLVM IR bitcode.";
+    }
+
+    return false;
   }
-  return false;
+
+  bool isCrossModuleIncrementalBuild = ArgList->hasArg(
+      options::OPT_enable_experimental_cross_module_incremental_build, false);
+
+  if (isWMO && isCrossModuleIncrementalBuild == false) {
+    if (ShowIncrementalBuildDecisions) {
+      llvm::outs()
+          << "Incremental compilation has been disabled, because it "
+          << "OPT_enable_experimental_cross_module_incremental_build is OFF\n";
+    }
+    return false;
+  }
+
+  return hasIncremental;
 }
 
 static std::string
@@ -1064,8 +1076,8 @@ Driver::buildCompilation(const ToolChain &TC,
     return nullptr;
   }
 
-  buildJobs(TopLevelActions, OI, OFM ? OFM.getPointer() : nullptr,
-            workingDirectory, TC, *C);
+  buildJobs(TopLevelActions, &outOfDateMap, OI,
+            OFM ? OFM.getPointer() : nullptr, workingDirectory, TC, *C);
 
   if (DriverPrintDerivedOutputFileMap) {
     C->getDerivedOutputFileMap().dump(llvm::outs(), true);
@@ -1923,33 +1935,6 @@ public:
 };
 } // namespace
 
-static IncrementalJobAction::InputInfo
-computePreviousBuildStateForWmo(const InputInfoMap *OutOfDateMap,
-                                ArrayRef<InputPair> Inputs) {
-  auto previousBuildState =
-      IncrementalJobAction::InputInfo::makeNeedsCascadingRebuild();
-  for (const InputPair &Input : Inputs) {
-    const Arg *InputArg = Input.second;
-    if (OutOfDateMap) {
-      auto previousRunInputInfo = OutOfDateMap->lookup(InputArg);
-      if (previousRunInputInfo.status ==
-          IncrementalJobAction::InputInfo::Status::NewlyAdded) {
-        previousBuildState = IncrementalJobAction::InputInfo::makeNewlyAdded();
-        break;
-      } else {
-        previousBuildState.status =
-            IncrementalJobAction::InputInfo::Status::UpToDate;
-        if (previousBuildState.previousModTime <
-            previousRunInputInfo.previousModTime) {
-          previousBuildState.previousModTime =
-              previousRunInputInfo.previousModTime;
-        }
-      }
-    }
-  }
-  return previousBuildState;
-}
-
 void Driver::buildActions(SmallVectorImpl<const Action *> &TopLevelActions,
                           const ToolChain &TC, const OutputInfo &OI,
                           const InputInfoMap *OutOfDateMap,
@@ -2146,10 +2131,7 @@ void Driver::buildActions(SmallVectorImpl<const Action *> &TopLevelActions,
     }
 
     // Create a single CompileJobAction for all of the driver's inputs.
-    auto previousBuildState =
-        computePreviousBuildStateForWmo(OutOfDateMap, Inputs);
-    auto *CA = C.createAction<CompileJobAction>(OI.CompilerOutputType,
-                                                previousBuildState);
+    auto *CA = C.createAction<CompileJobAction>(OI.CompilerOutputType);
     for (const InputPair &Input : Inputs) {
       file_types::ID InputType = Input.first;
       const Arg *InputArg = Input.second;
@@ -2418,9 +2400,9 @@ Driver::buildOutputFileMap(const llvm::opt::DerivedArgList &Args,
 }
 
 void Driver::buildJobs(ArrayRef<const Action *> TopLevelActions,
-                       const OutputInfo &OI, const OutputFileMap *OFM,
-                       StringRef workingDirectory, const ToolChain &TC,
-                       Compilation &C) const {
+                       InputInfoMap *inputInfoMap, const OutputInfo &OI,
+                       const OutputFileMap *OFM, StringRef workingDirectory,
+                       const ToolChain &TC, Compilation &C) const {
   llvm::PrettyStackTraceString CrashInfo("Building compilation jobs");
 
   const DerivedArgList &Args = C.getArgs();
@@ -2449,8 +2431,8 @@ void Driver::buildJobs(ArrayRef<const Action *> TopLevelActions,
 
   for (const Action *A : TopLevelActions) {
     if (auto *JA = dyn_cast<JobAction>(A)) {
-      (void)buildJobsForAction(C, JA, OFM, workingDirectory, /*TopLevel=*/true,
-                               JobCache);
+      (void)buildJobsForAction(C, JA, inputInfoMap, OFM, workingDirectory,
+                               /*TopLevel=*/true, JobCache);
     }
   }
 }
@@ -2832,79 +2814,53 @@ static void handleCompileJobCondition(Job *J,
   J->setCondition(condition);
 }
 
-/// If all the input files at \p inputs has not been modified since the last
+/// If all the input files at \p inputs have  not been modified since the last
 /// build (i.e. its mtime has not changed), adjust the Job's condition
 /// accordingly.
 static void
-handleCompileJobConditionForWmo(Job *J, CompileJobAction::InputInfo inputInfo,
+handleCompileJobConditionForWmo(Job *J, InputInfoMap *inputInfoMap,
                                 SmallVector<const Action *, 4> InputActions,
                                 bool alwaysRebuildDependents) {
-  using InputStatus = CompileJobAction::InputInfo::Status;
 
-  if (inputInfo.status == InputStatus::NewlyAdded) {
-    J->setCondition(Job::Condition::NewlyAdded);
-    return;
-  }
-
-  llvm::sys::TimePoint<> lastModificationTime = llvm::sys::TimePoint<>::min();
+  bool hasBeenModifiedSinceLastTime = false;
   for (auto action : InputActions) {
     if (auto inputAction = dyn_cast<InputAction>(action)) {
       StringRef inputFile = inputAction->getInputArg().getValue();
       llvm::sys::fs::file_status inputStatus;
+      auto it = inputInfoMap->find(&inputAction->getInputArg());
+      auto previousRunModTime = it != inputInfoMap->end()
+                                    ? it->getSecond().previousModTime
+                                    : llvm::sys::TimePoint<>::max();
+
       if (!llvm::sys::fs::status(inputFile, inputStatus)) {
-        if (lastModificationTime < inputStatus.getLastModificationTime()) {
-          lastModificationTime = inputStatus.getLastModificationTime();
+        if (hasBeenModifiedSinceLastTime == false &&
+            inputStatus.getLastModificationTime() != previousRunModTime) {
+          hasBeenModifiedSinceLastTime = true;
         }
+        J->setModtimeForInput(&inputAction->getInputArg(),
+                              inputStatus.getLastModificationTime());
       } else {
-        llvm_unreachable("stat call to inputFile failed. Don't know what to do "
-                         "in this case.");
-        /*
-         else if (!llvm::sys::fs::status(output, inputStatus)) {
-         J->setInputModTime(inputStatus.getLastModificationTime());
-         hasValidModTime = true;
-         }
-         */
+        llvm_unreachable(
+            "Something went wrong while executing stat call on the file.");
+        break;
       }
     }
   }
-  J->setInputModTime(lastModificationTime);
-  bool hasValidModTime = inputInfo.previousModTime == lastModificationTime;
-  auto output = J->getOutput().getPrimaryOutputFilename();
+  auto output = J->getOutput().getAnyOutputForType(file_types::TY_Object);
 
-  Job::Condition condition;
-  if (hasValidModTime) {
-    switch (inputInfo.status) {
-    case InputStatus::UpToDate:
-      if (llvm::sys::fs::exists(output))
-        condition = Job::Condition::CheckDependencies;
-      else
-        condition = Job::Condition::RunWithoutCascading;
-      break;
-    case InputStatus::NeedsCascadingBuild:
-      condition = Job::Condition::Always;
-      break;
-    case InputStatus::NeedsNonCascadingBuild:
-      condition = Job::Condition::RunWithoutCascading;
-      break;
-    case InputStatus::NewlyAdded:
-      llvm_unreachable("handled above");
-    }
-  } else {
-    if (alwaysRebuildDependents ||
-        inputInfo.status == InputStatus::NeedsCascadingBuild) {
-      condition = Job::Condition::Always;
-    } else {
-      condition = Job::Condition::RunWithoutCascading;
-    }
+  if (hasBeenModifiedSinceLastTime == false && !output.empty() &&
+      llvm::sys::fs::exists(output)) {
+    J->setCondition(Job::Condition::CheckDependencies);
+    return;
   }
-
-  J->setCondition(condition);
+  J->setCondition(Job::Condition::Always);
 }
 
 Job *Driver::buildJobsForAction(Compilation &C, const JobAction *JA,
+                                InputInfoMap *inputInfoMap,
                                 const OutputFileMap *OFM,
-                                StringRef workingDirectory,
-                                bool AtTopLevel, JobCacheMap &JobCache) const {
+                                StringRef workingDirectory, bool AtTopLevel,
+                                JobCacheMap &JobCache) const {
 
   PrettyStackTraceDriverAction CrashInfo("building jobs", JA);
 
@@ -2923,8 +2879,9 @@ Job *Driver::buildJobsForAction(Compilation &C, const JobAction *JA,
   SmallVector<const Job *, 4> InputJobs;
   for (const Action *Input : *JA) {
     if (auto *InputJobAction = dyn_cast<JobAction>(Input)) {
-      InputJobs.push_back(buildJobsForAction(
-          C, InputJobAction, OFM, workingDirectory, false, JobCache));
+      InputJobs.push_back(buildJobsForAction(C, InputJobAction, inputInfoMap,
+                                             OFM, workingDirectory, false,
+                                             JobCache));
     } else {
       InputActions.push_back(Input);
     }
@@ -3052,8 +3009,8 @@ Job *Driver::buildJobsForAction(Compilation &C, const JobAction *JA,
     const bool alwaysRebuildDependents =
         C.getArgs().hasArg(options::OPT_driver_always_rebuild_dependents);
     if (OI.CompilerMode == OutputInfo::Mode::SingleCompile) {
-      handleCompileJobConditionForWmo(J, incrementalJob->getInputInfo(),
-                                      InputActions, alwaysRebuildDependents);
+      handleCompileJobConditionForWmo(J, inputInfoMap, InputActions,
+                                      alwaysRebuildDependents);
     } else if (!J->getOutput()
                     .getAdditionalOutputForType(file_types::TY_SwiftDeps)
                     .empty()) {

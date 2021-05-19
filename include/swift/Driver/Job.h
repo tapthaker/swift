@@ -20,6 +20,7 @@
 #include "swift/Driver/Action.h"
 #include "swift/Driver/Util.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -308,6 +309,9 @@ private:
   /// The modification time of the main input file, if any.
   llvm::sys::TimePoint<> InputModTime = llvm::sys::TimePoint<>::max();
 
+  llvm::SmallMapVector<const llvm::opt::Arg *, llvm::sys::TimePoint<>, 16>
+      inputPreviousModTimeMap;
+
 #ifndef NDEBUG
   /// The "wave" of incremental jobs that this \c Job was scheduled into.
   ///
@@ -376,6 +380,11 @@ public:
   llvm::sys::TimePoint<> getInputModTime() const {
     return InputModTime;
   }
+
+  void setModtimeForInput(const llvm::opt::Arg *Input,
+                          llvm::sys::TimePoint<> PreviousModTime);
+
+  llvm::sys::TimePoint<> getModTimeforInput(const llvm::opt::Arg *Input) const;
 
   ArrayRef<std::pair<const char *, const char *>> getExtraEnvironment() const {
     return ExtraEnvironment;

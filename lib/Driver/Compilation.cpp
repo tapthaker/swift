@@ -1732,6 +1732,17 @@ namespace driver {
       return false;
     }
 
+    static llvm::sys::TimePoint<>
+    getInputModTime(const Job *job, const InputAction *inputAction) {
+
+      auto *compileJobAction = dyn_cast<CompileJobAction>(&job->getSource());
+      if (!compileJobAction) {
+        return job->getInputModTime();
+      }
+
+      return job->getModTimeforInput(&inputAction->getInputArg());
+    }
+
   public:
     void populateInputInfoMap(InputInfoMap &inputs) const {
       for (auto &entry : UnfinishedCommands) {
@@ -1741,7 +1752,7 @@ namespace driver {
             continue;
 
           CompileJobAction::InputInfo info;
-          info.previousModTime = entry.first->getInputModTime();
+          info.previousModTime = getInputModTime(entry.first, inputFile);
           info.status = entry.second ?
             CompileJobAction::InputInfo::Status::NeedsCascadingBuild :
             CompileJobAction::InputInfo::Status::NeedsNonCascadingBuild;
@@ -1760,7 +1771,7 @@ namespace driver {
             continue;
 
           CompileJobAction::InputInfo info;
-          info.previousModTime = entry->getInputModTime();
+          info.previousModTime = getInputModTime(entry, inputFile);
           info.status = CompileJobAction::InputInfo::Status::UpToDate;
           inputs[&inputFile->getInputArg()] = info;
         }
@@ -2114,7 +2125,8 @@ Compilation::performJobsImpl(std::unique_ptr<TaskQueue> &&TQ) {
   if (!CompilationRecordPath.empty()) {
     InputInfoMap InputInfo;
     State.populateInputInfoMap(InputInfo);
-    checkForOutOfDateInputs(Diags, InputInfo);
+    if (!EnableCrossModuleIncrementalBuild)
+      checkForOutOfDateInputs(Diags, InputInfo);
 
     auto result = std::move(State).takeResult();
     writeCompilationRecord(CompilationRecordPath, ArgsHash, BuildStartTime,
