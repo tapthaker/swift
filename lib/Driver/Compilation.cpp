@@ -476,6 +476,12 @@ namespace driver {
       }
       const bool compileExitedNormally =
           ReturnCode == EXIT_SUCCESS || ReturnCode == EXIT_FAILURE;
+
+      if (Comp.getOutputInfo().CompilerMode ==
+          OutputInfo::Mode::SingleCompile) {
+        return {};
+      }
+
       return !compileExitedNormally
                  ? reloadAndRemarkDepsOnAbnormalExit(FinishedCmd, forRanges)
                  : reloadAndRemarkDepsOnNormalExit(FinishedCmd, /*cmdFailed=*/
@@ -894,6 +900,11 @@ namespace driver {
           Comp.getEnableSourceRangeDependencies();
       const bool isComparing = Comp.IncrementalComparator.hasValue();
 
+      if (Comp.getOutputInfo().CompilerMode ==
+          OutputInfo::Mode::SingleCompile) {
+        return computeDependenciesAndGetNeededCompileJobsForWmo();
+      }
+
       CommandSet jobsWithRanges, jobsWithoutRanges;
       if (useRangesForScheduling || isComparing)
         jobsWithRanges =
@@ -973,6 +984,42 @@ namespace driver {
       if ((!jobsToSchedule.empty() || sawModuleWrapJob) && mergeModulesJob) {
         jobsToSchedule.insert(mergeModulesJob);
       }
+      return jobsToSchedule;
+    }
+
+    /// Return jobs to run if using dependencies, may include duplicates.
+    /// If optional argument is present, optimize with source range info
+    CommandSet computeDependenciesAndGetNeededCompileJobsForWmo() {
+      CommandSet jobsToSchedule;
+      assert(Comp.getJobs().size() == 1 && "WMO cannot have multiple jobs");
+      const Job *Cmd = Comp.getJobs().front();
+
+      if (Cmd->getCondition() != Job::Condition::CheckDependencies) {
+        jobsToSchedule.insert(Cmd);
+        return jobsToSchedule;
+      }
+
+      for (auto ip : Comp.getInputFiles()) {
+        if (ip.first == file_types::TY_Swift) {
+          const char *filename = ip.second->getValue();
+          std::string string;
+          string.append("/tmp/cross-module-wmo");
+          string.append(filename);
+          string.append(".swiftdeps");
+          const StringRef dependencyFile = StringRef(string);
+          getFineGrainedDepGraph(false).loadFromPathWmo(Cmd, dependencyFile,
+                                                        Comp.getDiags());
+        }
+      }
+
+      if (collectExternallyDependentJobsFromDependencyGraph(false).size() > 0) {
+        jobsToSchedule.insert(Cmd);
+      } else if (collectIncrementalExternallyDependentJobsFromDependencyGraph(
+                     false)
+                     .size() > 0) {
+        jobsToSchedule.insert(Cmd);
+      }
+
       return jobsToSchedule;
     }
 
@@ -1685,6 +1732,17 @@ namespace driver {
       return false;
     }
 
+    static llvm::sys::TimePoint<>
+    getInputModTime(const Job *job, const InputAction *inputAction) {
+
+      auto *compileJobAction = dyn_cast<CompileJobAction>(&job->getSource());
+      if (!compileJobAction) {
+        return job->getInputModTime();
+      }
+
+      return job->getModTimeforInput(&inputAction->getInputArg());
+    }
+
   public:
     void populateInputInfoMap(InputInfoMap &inputs) const {
       for (auto &entry : UnfinishedCommands) {
@@ -1694,7 +1752,7 @@ namespace driver {
             continue;
 
           CompileJobAction::InputInfo info;
-          info.previousModTime = entry.first->getInputModTime();
+          info.previousModTime = getInputModTime(entry.first, inputFile);
           info.status = entry.second ?
             CompileJobAction::InputInfo::Status::NeedsCascadingBuild :
             CompileJobAction::InputInfo::Status::NeedsNonCascadingBuild;
@@ -1713,7 +1771,7 @@ namespace driver {
             continue;
 
           CompileJobAction::InputInfo info;
-          info.previousModTime = entry->getInputModTime();
+          info.previousModTime = getInputModTime(entry, inputFile);
           info.status = CompileJobAction::InputInfo::Status::UpToDate;
           inputs[&inputFile->getInputArg()] = info;
         }
@@ -2067,7 +2125,8 @@ Compilation::performJobsImpl(std::unique_ptr<TaskQueue> &&TQ) {
   if (!CompilationRecordPath.empty()) {
     InputInfoMap InputInfo;
     State.populateInputInfoMap(InputInfo);
-    checkForOutOfDateInputs(Diags, InputInfo);
+    if (!EnableCrossModuleIncrementalBuild)
+      checkForOutOfDateInputs(Diags, InputInfo);
 
     auto result = std::move(State).takeResult();
     writeCompilationRecord(CompilationRecordPath, ArgsHash, BuildStartTime,

@@ -319,7 +319,8 @@ public:
   /// \param TC The ToolChain to build Jobs with.
   /// \param C The Compilation containing the Actions for which Jobs should be
   /// created.
-  void buildJobs(ArrayRef<const Action *> TopLevelActions, const OutputInfo &OI,
+  void buildJobs(ArrayRef<const Action *> TopLevelActions,
+                 InputInfoMap *inputInfoMap, const OutputInfo &OI,
                  const OutputFileMap *OFM, StringRef workingDirectory,
                  const ToolChain &TC, Compilation &C) const;
 
@@ -338,9 +339,9 @@ public:
   ///
   /// \returns a Job for the given Action/ToolChain pair
   Job *buildJobsForAction(Compilation &C, const JobAction *JA,
-                          const OutputFileMap *OFM,
-                          StringRef workingDirectory,
-                          bool AtTopLevel, JobCacheMap &JobCache) const;
+                          InputInfoMap *inputInfoMap, const OutputFileMap *OFM,
+                          StringRef workingDirectory, bool AtTopLevel,
+                          JobCacheMap &JobCache) const;
 
 private:
   void computeMainOutput(Compilation &C, const JobAction *JA,

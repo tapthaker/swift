@@ -207,8 +207,7 @@ bool CompilerInstance::setUpASTContextIfNeeded() {
 
   // For the time being, we only need to record dependencies in batch mode
   // and single file builds.
-  Invocation.getLangOptions().RecordRequestReferences
-    = !isWholeModuleCompilation();
+  Invocation.getLangOptions().RecordRequestReferences = true;
 
   Context.reset(ASTContext::get(
       Invocation.getLangOptions(), Invocation.getTypeCheckerOptions(),
@@ -1083,11 +1082,8 @@ CompilerInstance::getSourceFileParsingOptions(bool forPrimary) const {
     opts |= SourceFile::ParsingFlags::SuppressWarnings;
   }
 
-  // Enable interface hash computation for primaries, but not in WMO, as it's
-  // only currently needed for incremental mode.
-  if (forPrimary) {
-    opts |= SourceFile::ParsingFlags::EnableInterfaceHash;
-  }
+  opts |= SourceFile::ParsingFlags::EnableInterfaceHash;
+
   return opts;
 }
 
